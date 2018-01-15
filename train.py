@@ -20,13 +20,14 @@ import pixel_cnn_pp.plotting as plotting
 from pixel_cnn_pp.model import model_spec
 import data.cifar10_data as cifar10_data
 import data.imagenet_data as imagenet_data
+import data.omniglot_data as omniglot_data
 
 # -----------------------------------------------------------------------------
 parser = argparse.ArgumentParser()
 # data I/O
 parser.add_argument('-i', '--data_dir', type=str, default='/tmp/pxpp/data', help='Location for the dataset')
 parser.add_argument('-o', '--save_dir', type=str, default='/tmp/pxpp/save', help='Location for parameter checkpoints and samples')
-parser.add_argument('-d', '--data_set', type=str, default='cifar', help='Can be either cifar|imagenet')
+parser.add_argument('-d', '--data_set', type=str, default='cifar', help='Can be cifar|imagenet|omniglot')
 parser.add_argument('-t', '--save_interval', type=int, default=20, help='Every how many epochs to write checkpoint/samples?')
 parser.add_argument('-r', '--load_params', dest='load_params', action='store_true', help='Restore training from previous model checkpoint?')
 # model
@@ -58,7 +59,7 @@ tf.set_random_seed(args.seed)
 # initialize data loaders for train/test splits
 if args.data_set == 'imagenet' and args.class_conditional:
     raise("We currently don't have labels for the small imagenet data set")
-DataLoader = {'cifar':cifar10_data.DataLoader, 'imagenet':imagenet_data.DataLoader}[args.data_set]
+DataLoader = {'cifar':cifar10_data.DataLoader, 'imagenet':imagenet_data.DataLoader, 'omniglot':omniglot_data.DataLoader}[args.data_set]
 train_data = DataLoader(args.data_dir, 'train', args.batch_size * args.nr_gpu, rng=rng, shuffle=True, return_labels=args.class_conditional)
 test_data = DataLoader(args.data_dir, 'test', args.batch_size * args.nr_gpu, shuffle=False, return_labels=args.class_conditional)
 obs_shape = train_data.get_observation_size() # e.g. a tuple (32,32,3)
@@ -130,6 +131,7 @@ for i in range(args.nr_gpu):
     with tf.device('/gpu:%d' % i):
         gen_par = model(xs[i], h_sample[i], ema=ema, dropout_p=0, **model_opt)
         new_x_gen.append(nn.sample_from_discretized_mix_logistic(gen_par, args.nr_logistic_mix))
+
 def sample_from_model(sess):
     x_gen = [np.zeros((args.batch_size,) + obs_shape, dtype=np.float32) for i in range(args.nr_gpu)]
     for yi in range(obs_shape[0]):
@@ -150,7 +152,8 @@ def make_feed_dict(data, init=False):
     else:
         x = data
         y = None
-    x = np.cast[np.float32]((x - 127.5) / 127.5) # input to pixelCNN is scaled from uint8 [0,255] to float in range [-1,1]
+    if np.max(x) > 1:  # only rescale if we need to.
+        x = np.cast[np.float32]((x - 127.5) / 127.5) # input to pixelCNN is scaled from uint8 [0,255] to float in range [-1,1]
     if init:
         feed_dict = {x_init: x}
         if y is not None:
@@ -166,7 +169,6 @@ def make_feed_dict(data, init=False):
 # //////////// perform training //////////////
 if not os.path.exists(args.save_dir):
     os.makedirs(args.save_dir)
-print('starting training')
 test_bpd = []
 lr = args.learning_rate
 with tf.Session() as sess:
@@ -183,9 +185,11 @@ with tf.Session() as sess:
                 ckpt_file = args.save_dir + '/params_' + args.data_set + '.ckpt'
                 print('restoring parameters from', ckpt_file)
                 saver.restore(sess, ckpt_file)
+            print('starting training...')
 
         # train for one epoch
         train_losses = []
+        itr=0
         for d in train_data:
             feed_dict = make_feed_dict(d)
             # forward/backward/update model on each gpu
@@ -193,6 +197,9 @@ with tf.Session() as sess:
             feed_dict.update({ tf_lr: lr })
             l,_ = sess.run([bits_per_dim, optimizer], feed_dict)
             train_losses.append(l)
+            itr += 1
+            if itr % 400 == 0:
+                print itr, l
         train_loss_gen = np.mean(train_losses)
 
         # compute likelihood over test data
@@ -213,6 +220,8 @@ with tf.Session() as sess:
             # generate samples from the model
             sample_x = sample_from_model(sess)
             img_tile = plotting.img_tile(sample_x[:int(np.floor(np.sqrt(args.batch_size*args.nr_gpu))**2)], aspect_ratio=1.0, border_color=1.0, stretch=True)
+            if img_tile.shape[-1] == 1:
+                img_tile = np.concatenate([img_tile, img_tile, img_tile], 2)
             img = plotting.plot_img(img_tile, title=args.data_set + ' samples')
             plotting.plt.savefig(os.path.join(args.save_dir,'%s_sample%d.png' % (args.data_set, epoch)))
             plotting.plt.close('all')

@@ -14,6 +14,7 @@ def model_spec(x, h=None, init=False, ema=None, dropout_p=0.5, nr_resnet=5, nr_f
     that position.
     'h' is an optional N x K matrix of values to condition our generative model on
     """
+    num_channels = int(x.get_shape()[-1])
 
     counters = {}
     with arg_scope([nn.conv2d, nn.deconv2d, nn.gated_resnet, nn.dense], counters=counters, init=init, ema=ema, dropout_p=dropout_p):
@@ -76,7 +77,8 @@ def model_spec(x, h=None, init=False, ema=None, dropout_p=0.5, nr_resnet=5, nr_f
                 u = nn.gated_resnet(u, u_list.pop(), conv=nn.down_shifted_conv2d)
                 ul = nn.gated_resnet(ul, tf.concat(3, [u, ul_list.pop()]), conv=nn.down_right_shifted_conv2d)
 
-            x_out = nn.nin(tf.nn.elu(ul),10*nr_logistic_mix)
+            num_distr_params = num_channels*3 + 1
+            x_out = nn.nin(tf.nn.elu(ul),num_distr_params*nr_logistic_mix)
 
             assert len(u_list) == 0
             assert len(ul_list) == 0
